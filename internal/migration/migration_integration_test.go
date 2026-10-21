@@ -1,0 +1,203 @@
+//go:build integration
+
+package migration
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/zukan/corvus/internal/repository"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"golang.org/x/crypto/bcrypt"
+)
+
+type dryRunSpy struct{ migrations, writes int }
+
+func (s *dryRunSpy) Migrate(context.Context) error { s.migrations++; return nil }
+func (s *dryRunSpy) PutImported(context.Context, string, any) (bool, error) {
+	s.writes++
+	return true, nil
+}
+
+func TestMongoToMySQLIntegration(t *testing.T) {
+	mongoURI := os.Getenv("MONGO_TEST_URI")
+	mysqlDSN := os.Getenv("MYSQL_TEST_DSN")
+	if mongoURI == "" || mysqlDSN == "" {
+		t.Skip("set MONGO_TEST_URI and MYSQL_TEST_DSN to isolated disposable services")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	dbName := "corvus_integration_" + strings.ToLower(bson.NewObjectID().Hex())
+	source, err := OpenMongo(ctx, mongoURI, dbName)
+	if err != nil {
+		t.Fatal("open Mongo test service failed")
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_ = source.database.Drop(cleanupCtx)
+		_ = source.Close(cleanupCtx)
+	}()
+
+	now := time.Date(2023, 7, 8, 9, 10, 11, 123000000, time.UTC)
+	deletedAt := now.Add(time.Hour)
+	orgID, adminID := bson.NewObjectID(), bson.NewObjectID()
+	appID, commentID, replyID := bson.NewObjectID(), bson.NewObjectID(), bson.NewObjectID()
+	orgSecret := integrationHash(t, "org-secret")
+	adminPassword := integrationHash(t, "admin-password")
+	fixtures := map[string]bson.M{
+		"organizations": {
+			"_id": orgID, "name": "Synthetic Org", "email": "org-" + orgID.Hex() + "@example.invalid",
+			"secret": orgSecret, "createdAt": now, "updatedAt": now, "deletedAt": deletedAt,
+		},
+		"admins": {
+			"_id": adminID, "organizationId": orgID, "fullname": "Synthetic Admin",
+			"email": "admin-" + adminID.Hex() + "@example.invalid", "password": adminPassword,
+			"createdAt": now, "updatedAt": now,
+		},
+		"applications": {
+			"_id": appID, "organizationId": orgID, "createdBy": adminID, "name": "Synthetic App",
+			"createdAt": now, "updatedAt": now, "deleted": true, "deletedAt": deletedAt,
+		},
+		"comments": {
+			"_id": commentID, "applicationId": appID, "ownerId": "synthetic-user", "content": "synthetic comment",
+			"refId": "ref-1", "origin": "integration", "replies": bson.A{replyID},
+			"flags": bson.A{"flagger-a", "flagger-b"}, "upVotes": bson.A{"voter-up"},
+			"downVotes": bson.A{"voter-down"}, "createdAt": now, "updatedAt": now,
+		},
+		"replies": {
+			"_id": replyID, "commentId": commentID, "ownerId": "synthetic-replier", "content": "synthetic reply",
+			"flags": bson.A{"reply-flag"}, "upVotes": bson.A{"reply-up"}, "downVotes": bson.A{"reply-down"},
+			"createdAt": now, "updatedAt": now,
+		},
+	}
+	for collection, fixture := range fixtures {
+		if _, err := source.database.Collection(collection).InsertOne(ctx, fixture); err != nil {
+			t.Fatalf("insert Mongo fixture into %s failed", collection)
+		}
+	}
+
+	spy := &dryRunSpy{}
+	dryReport, err := Run(ctx, source, spy, true)
+	if err != nil {
+		t.Fatal("dry-run validation failed")
+	}
+	if spy.migrations != 0 || spy.writes != 0 {
+		t.Fatalf("dry-run called MySQL sink: migrations=%d writes=%d", spy.migrations, spy.writes)
+	}
+	assertCounts(t, dryReport, 1, 0, 0)
+
+	repo, err := repository.Open(ctx, mysqlDSN)
+	if err != nil {
+		t.Fatal("open disposable MySQL test service failed")
+	}
+	defer repo.Close()
+	first, err := Run(ctx, source, repo, false)
+	if err != nil {
+		t.Fatal("first import failed")
+	}
+	assertCounts(t, first, 1, 1, 0)
+
+	// Change the source row between passes; insert-only behavior must preserve the
+	// first imported value for the same ID.
+	if _, err = source.database.Collection("organizations").UpdateByID(ctx, orgID, bson.M{"$set": bson.M{"name": "Changed Source"}}); err != nil {
+		t.Fatal("update synthetic Mongo fixture failed")
+	}
+	second, err := Run(ctx, source, repo, false)
+	if err != nil {
+		t.Fatal("repeat import failed")
+	}
+	assertCounts(t, second, 1, 0, 1)
+
+	cfg, err := mysql.ParseDSN(mysqlDSN)
+	if err != nil {
+		t.Fatal("parse disposable MySQL test DSN failed")
+	}
+	cfg.ParseTime = true
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		t.Fatal("open MySQL verification connection failed")
+	}
+	defer db.Close()
+	verifyIntegrationRows(t, ctx, db, orgID, adminID, appID, commentID, replyID, orgSecret, adminPassword, now, deletedAt)
+}
+
+func integrationHash(t *testing.T, value string) string {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(value), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal("create synthetic bcrypt fixture failed")
+	}
+	return string(hash)
+}
+
+func assertCounts(t *testing.T, report map[string]Counts, read, inserted, skipped int) {
+	t.Helper()
+	for _, collection := range collections {
+		count := report[collection]
+		if count.Read != read || count.Inserted != inserted || count.Skipped != skipped {
+			t.Fatalf("%s counts = %#v, want read=%d inserted=%d skipped=%d", collection, count, read, inserted, skipped)
+		}
+	}
+}
+
+func verifyIntegrationRows(t *testing.T, ctx context.Context, db *sql.DB, orgID, adminID, appID, commentID, replyID bson.ObjectID, orgSecret, adminPassword string, now, deletedAt time.Time) {
+	t.Helper()
+	var id, name, email, secret string
+	var created, updated time.Time
+	var orgDeletedAt sql.NullTime
+	var deleted bool
+	if err := db.QueryRowContext(ctx, "SELECT id,name,email,secret,created_at,updated_at,deleted,deleted_at FROM organizations WHERE id=?", orgID.Hex()).Scan(&id, &name, &email, &secret, &created, &updated, &deleted, &orgDeletedAt); err != nil {
+		t.Fatal("read imported organization failed")
+	}
+	if id != orgID.Hex() || name != "Synthetic Org" || secret != orgSecret || !created.Equal(now) || !updated.Equal(now) || !deleted || !orgDeletedAt.Valid || !orgDeletedAt.Time.Equal(deletedAt) {
+		t.Fatalf("organization preservation mismatch: id=%q name=%q timestamps=%v/%v deleted=%v", id, name, created, updated, deleted)
+	}
+	var password string
+	if err := db.QueryRowContext(ctx, "SELECT password FROM admins WHERE id=?", adminID.Hex()).Scan(&password); err != nil || password != adminPassword {
+		t.Fatal("admin password hash was not preserved")
+	}
+	var appDeletedAt sql.NullTime
+	if err := db.QueryRowContext(ctx, "SELECT deleted,deleted_at FROM applications WHERE id=?", appID.Hex()).Scan(&deleted, &appDeletedAt); err != nil || !deleted || !appDeletedAt.Valid || !appDeletedAt.Time.Equal(deletedAt) {
+		t.Fatal("application deleted state and timestamp were not preserved")
+	}
+	var applicationID, owner, content, refID, origin string
+	var repliesRaw, flagsRaw, upVotesRaw, downVotesRaw []byte
+	if err := db.QueryRowContext(ctx, "SELECT application_id,owner_id,content,ref_id,origin,replies,flags,up_votes,down_votes FROM comments WHERE id=?", commentID.Hex()).Scan(&applicationID, &owner, &content, &refID, &origin, &repliesRaw, &flagsRaw, &upVotesRaw, &downVotesRaw); err != nil {
+		t.Fatal("read imported comment failed")
+	}
+	var replies, flags, upVotes, downVotes []string
+	for i, raw := range [][]byte{repliesRaw, flagsRaw, upVotesRaw, downVotesRaw} {
+		var values []string
+		if err := json.Unmarshal(raw, &values); err != nil {
+			t.Fatal("decode imported comment array failed")
+		}
+		switch i {
+		case 0:
+			replies = values
+		case 1:
+			flags = values
+		case 2:
+			upVotes = values
+		case 3:
+			downVotes = values
+		}
+	}
+	if applicationID != appID.Hex() || owner != "synthetic-user" || content != "synthetic comment" || refID != "ref-1" || origin != "integration" ||
+		!reflect.DeepEqual(replies, []string{replyID.Hex()}) || !reflect.DeepEqual(flags, []string{"flagger-a", "flagger-b"}) ||
+		!reflect.DeepEqual(upVotes, []string{"voter-up"}) || !reflect.DeepEqual(downVotes, []string{"voter-down"}) {
+		t.Fatal("comment relations or arrays were not preserved")
+	}
+	var commentRef string
+	if err := db.QueryRowContext(ctx, "SELECT comment_id FROM comment_replies WHERE id=?", replyID.Hex()).Scan(&commentRef); err != nil || commentRef != commentID.Hex() {
+		t.Fatal("reply relation was not preserved")
+	}
+}
