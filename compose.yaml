@@ -1,0 +1,35 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: corvus
+      MYSQL_USER: corvus_demo
+      MYSQL_PASSWORD: local_demo_password
+      MYSQL_ROOT_PASSWORD: local_demo_root_password
+    ports:
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "corvus_demo", "-plocal_demo_password"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  corvus:
+    build: .
+    environment:
+      MYSQL_DSN: corvus_demo:local_demo_password@tcp(mysql:3306)/corvus?parseTime=true
+      APP_SECRET: ZGVtby1hcHBsaWNhdGlvbi1zZWNyZXQtZm9yLWxvY2FsLWRldmVsb3BtZW50
+      ORG_SECRET: ZGVtby1vcmdhbml6YXRpb24tc2VjcmV0LWZvci1sb2NhbC1kZXZlbG9wbWVudA==
+      ADDR: :4000
+      DISABLE_AUTH: "true"
+      AUTO_MIGRATE: "true"
+    ports:
+      - "127.0.0.1:4000:4000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:

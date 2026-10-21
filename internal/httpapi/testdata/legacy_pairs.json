@@ -1,0 +1,338 @@
+{
+  "source": [
+    "createSingleComment.test.js",
+    "getSingleComment.test.js",
+    "getAllComments.test.js",
+    "updateSingleComment.test.js",
+    "deleteSingleComment.test.js"
+  ],
+  "seed": {
+    "applicationId": "64a000000000000000000001",
+    "commentId": "64b000000000000000000001",
+    "otherCommentId": "64b000000000000000000002",
+    "foreignCommentId": "64b000000000000000000003",
+    "createdAt": "2026-10-22T00:00:00.000Z",
+    "otherCreatedAt": "2026-10-22T00:01:00.000Z",
+    "comment": {
+      "refId": "ref-primary",
+      "ownerId": "user1@example.com",
+      "content": "A comment from user 1",
+      "origin": "web",
+      "flags": [],
+      "upVotes": [],
+      "downVotes": [],
+      "replies": []
+    },
+    "otherComment": {
+      "refId": "ref-secondary",
+      "ownerId": "user2@example.com",
+      "content": "A comment from user 2",
+      "origin": "mobile",
+      "flags": ["flagger@example.com"],
+      "upVotes": ["voter@example.com"],
+      "downVotes": [],
+      "replies": []
+    }
+  },
+  "pairs": {
+    "create": {
+      "request": {
+        "method": "POST",
+        "path": "/v1/comments",
+        "body": {
+          "refId": "new-ref",
+          "ownerId": "user3@example.com",
+          "content": "this is a comment",
+          "origin": "mobile"
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "status": "success",
+          "message": "Comment created successfully",
+          "data": {
+            "commentId": "$any-string",
+            "refId": "new-ref",
+            "applicationId": "$applicationId",
+            "ownerId": "user3@example.com",
+            "content": "this is a comment",
+            "origin": "mobile",
+            "numOfVotes": 0,
+            "numOfUpVotes": 0,
+            "numOfDownVotes": 0,
+            "numOfFlags": 0,
+            "numOfReplies": 0,
+            "createdAt": "$any-time",
+            "updatedAt": "$any-time"
+          }
+        }
+      }
+    },
+    "getItem": {
+      "request": {"method": "GET", "path": "/v1/comments/$commentId"},
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "message": "Comment Retrieved Successfully",
+          "data": {
+            "commentId": "$commentId",
+            "refId": "ref-primary",
+            "applicationId": "$applicationId",
+            "ownerId": "user1@example.com",
+            "content": "A comment from user 1",
+            "origin": "web",
+            "numOfVotes": 0,
+            "numOfUpVotes": 0,
+            "numOfDownVotes": 0,
+            "numOfFlags": 0,
+            "numOfReplies": 0,
+            "createdAt": "2026-10-22T00:00:00.000Z",
+            "updatedAt": "2026-10-22T00:00:00.000Z"
+          }
+        }
+      }
+    },
+    "listPage": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/comments",
+        "query": {"limit": "1", "page": "1", "sort": "desc"}
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "message": "Comments Retrieved Successfully",
+          "data": {
+            "records": [
+              {
+                "commentId": "$otherCommentId",
+                "refId": "ref-secondary",
+                "applicationId": "$applicationId",
+                "ownerId": "user2@example.com",
+                "content": "A comment from user 2",
+                "origin": "mobile",
+                "numOfVotes": 1,
+                "numOfUpVotes": 1,
+                "numOfDownVotes": 0,
+                "numOfFlags": 1,
+                "numOfReplies": 0,
+                "createdAt": "2026-10-22T00:01:00.000Z",
+                "updatedAt": "2026-10-22T00:01:00.000Z"
+              }
+            ],
+            "pageInfo": {
+              "currentPage": 1,
+              "totalPages": 2,
+              "hasNext": true,
+              "hasPrev": false,
+              "nextPage": 2,
+              "prevPage": null,
+              "pageRecordCount": 1,
+              "totalRecord": 2
+            }
+          }
+        }
+      }
+    },
+    "listFlagged": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/comments",
+        "query": {"isFlagged": "true", "ownerId": "user2@example.com"}
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "message": "Comments Retrieved Successfully",
+          "data": {
+            "records": [
+              {
+                "commentId": "$otherCommentId",
+                "refId": "ref-secondary",
+                "applicationId": "$applicationId",
+                "ownerId": "user2@example.com",
+                "content": "A comment from user 2",
+                "origin": "mobile",
+                "numOfVotes": 1,
+                "numOfUpVotes": 1,
+                "numOfDownVotes": 0,
+                "numOfFlags": 1,
+                "numOfReplies": 0,
+                "createdAt": "2026-10-22T00:01:00.000Z",
+                "updatedAt": "2026-10-22T00:01:00.000Z"
+              }
+            ],
+            "pageInfo": {
+              "currentPage": 1,
+              "totalPages": 1,
+              "hasNext": false,
+              "hasPrev": false,
+              "nextPage": null,
+              "prevPage": null,
+              "pageRecordCount": 1,
+              "totalRecord": 1
+            }
+          }
+        }
+      }
+    },
+    "update": {
+      "request": {
+        "method": "PATCH",
+        "path": "/v1/comments/$commentId",
+        "body": {"ownerId": "user1@example.com", "content": "New Comment Update"}
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "message": "Updated sucessfully",
+          "data": {
+            "content": "New Comment Update",
+            "ownerId": "user1@example.com",
+            "updatedAt": "2026-10-22T00:00:00.000Z"
+          }
+        }
+      }
+    },
+    "delete": {
+      "request": {
+        "method": "DELETE",
+        "path": "/v1/comments/$commentId",
+        "body": {"ownerId": "user1@example.com"}
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "status": "success",
+          "message": "Comment successfully deleted",
+          "data": {
+            "commentId": "$commentId",
+            "refId": "ref-primary",
+            "applicationId": "$applicationId",
+            "ownerId": "user1@example.com",
+            "content": "A comment from user 1",
+            "origin": "web",
+            "numOfVotes": 0,
+            "numOfUpVotes": 0,
+            "numOfDownVotes": 0,
+            "numOfFlags": 0,
+            "numOfReplies": 0,
+            "createdAt": "2026-10-22T00:00:00.000Z",
+            "updatedAt": "2026-10-22T00:00:00.000Z"
+          }
+        }
+      }
+    },
+    "missingContent": {
+      "request": {
+        "method": "POST",
+        "path": "/v1/comments",
+        "body": {"ownerId": "user1@example.com"}
+      },
+      "response": {
+        "status": 422,
+        "body": {
+          "status": "error",
+          "error": "Invalid input supplied",
+          "data": ["\"content\" is required in body"]
+        }
+      }
+    },
+    "missingBearer": {
+      "request": {"method": "GET", "path": "/v1/comments"},
+      "response": {
+        "status": 401,
+        "body": {
+          "status": "error",
+          "error": "No authorization token was found",
+          "data": []
+        }
+      }
+    },
+    "wrongOwnerPatch": {
+      "request": {
+        "method": "PATCH",
+        "path": "/v1/comments/$commentId",
+        "body": {"ownerId": "someone-else@example.com", "content": "Denied update"}
+      },
+      "response": {
+        "status": 403,
+        "body": {
+          "status": "error",
+          "error": "Sorry, comment cannot be updated or Unauthorized",
+          "data": []
+        }
+      }
+    },
+    "wrongOwnerDelete": {
+      "request": {
+        "method": "DELETE",
+        "path": "/v1/comments/$commentId",
+        "body": {"ownerId": "someone-else@example.com"}
+      },
+      "response": {
+        "status": 404,
+        "body": {
+          "status": "error",
+          "error": "Comment not found or unauthorized",
+          "data": []
+        }
+      }
+    },
+    "pageOverflow": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/comments",
+        "query": {"limit": "1", "page": "3"}
+      },
+      "response": {
+        "status": 404,
+        "body": {
+          "status": "error",
+          "error": "Page limit exceeded, No records found!",
+          "data": {
+            "currentPage": 3,
+            "totalPages": 2,
+            "hasNext": false,
+            "hasPrev": true,
+            "nextPage": null,
+            "prevPage": 2,
+            "pageRecordCount": 0,
+            "totalRecord": 2
+          }
+        }
+      }
+    },
+    "limitOver50": {
+      "request": {
+        "method": "GET",
+        "path": "/v1/comments",
+        "query": {"limit": "51"}
+      },
+      "response": {
+        "status": 422,
+        "body": {
+          "status": "error",
+          "error": "Invalid limit specified. Query Limit Pecked at 50",
+          "data": []
+        }
+      }
+    },
+    "crossTenantItem": {
+      "request": {"method": "GET", "path": "/v1/comments/$foreignCommentId"},
+      "response": {
+        "status": 404,
+        "body": {
+          "status": "error",
+          "error": "Comment with the ID 64b000000000000000000003 doesn't exist or has been removed",
+          "data": []
+        }
+      }
+    }
+  }
+}

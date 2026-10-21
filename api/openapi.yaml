@@ -1,0 +1,518 @@
+openapi: 3.0.3
+info:
+  title: Corvus API
+  version: 1.0.0
+  description: >-
+    Tenant-scoped supported subset of the Comment MicroAPI contract. Replies,
+    votes, and flags have no mutation operations. Imported legacy data for those
+    features is retained and exposed as comment counts.
+servers:
+  - url: http://localhost:4000
+    description: Local development
+tags:
+  - name: Bootstrap
+  - name: Comments
+  - name: Health
+paths:
+  /v1/organizations:
+    post:
+      tags: [Bootstrap]
+      operationId: createOrganization
+      summary: Create an organization and its first admin
+      description: Public signup. The organization secret and admin password must each be at least six characters; email addresses are normalized to lowercase.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOrganizationRequest' }
+      responses:
+        '201':
+          description: Organization and default admin created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/OrganizationCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/organizations/token:
+    post:
+      tags: [Bootstrap]
+      operationId: createOrganizationToken
+      summary: Exchange admin credentials for an organization token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrganizationTokenRequest' }
+      responses:
+        '200':
+          description: Organization token issued
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/OrganizationToken' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/applications:
+    post:
+      tags: [Bootstrap]
+      operationId: createApplication
+      summary: Create an application in the authenticated organization
+      security: [{ OrganizationBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateApplicationRequest' }
+      responses:
+        '201':
+          description: Application created and application token issued
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ApplicationCreated' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/applications/{applicationId}/token:
+    post:
+      tags: [Bootstrap]
+      operationId: createApplicationToken
+      summary: Issue an application token
+      description: The application must belong to the organization in the bearer token.
+      security: [{ OrganizationBearer: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ApplicationId'
+      responses:
+        '201':
+          description: Application token issued
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/ApplicationToken' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/comments:
+    post:
+      tags: [Comments]
+      operationId: createComment
+      summary: Create a comment
+      security: [{ ApplicationBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCommentRequest' }
+      responses:
+        '201':
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Comment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    get:
+      tags: [Comments]
+      operationId: listComments
+      summary: List comments for the authenticated application
+      security: [{ ApplicationBearer: [] }]
+      parameters:
+        - { name: refId, in: query, required: false, schema: { type: string } }
+        - { name: origin, in: query, required: false, schema: { type: string } }
+        - { name: ownerId, in: query, required: false, schema: { type: string } }
+        - { name: page, in: query, required: false, description: 'Positive one-based page number.', schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, required: false, description: 'Positive page size, maximum 50.', schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+        - { name: sort, in: query, required: false, description: 'Ascending by default; accepted values are asc, ascending, 1, desc, descending, and -1.', schema: { type: string, enum: [asc, ascending, '1', desc, descending, '-1'] } }
+        - { name: isFlagged, in: query, required: false, description: 'Filter by whether a comment has one or more stored flags.', schema: { type: boolean } }
+      responses:
+        '200':
+          description: Comment page
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/CommentPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '404': { $ref: '#/components/responses/PageNotFound' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /v1/comments/{commentId}:
+    parameters:
+      - $ref: '#/components/parameters/CommentId'
+    get:
+      tags: [Comments]
+      operationId: getComment
+      summary: Get a comment
+      security: [{ ApplicationBearer: [] }]
+      responses:
+        '200':
+          description: Comment retrieved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Comment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CommentNotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    patch:
+      tags: [Comments]
+      operationId: updateComment
+      summary: Update comment content
+      description: Both ownerId and content are required. The ownerId must match the stored comment owner.
+      security: [{ ApplicationBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateCommentRequest' }
+      responses:
+        '200':
+          description: Comment updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/CommentUpdated' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/CommentNotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      tags: [Comments]
+      operationId: deleteComment
+      summary: Soft-delete a comment
+      description: The ownerId must match the stored comment owner. A deleted comment is omitted from normal reads.
+      security: [{ ApplicationBearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeleteCommentRequest' }
+      responses:
+        '200':
+          description: Comment soft-deleted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Comment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/CommentNotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/InvalidInput' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: health
+      summary: Liveness check
+      responses:
+        '200':
+          description: Process is running
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: readiness
+      summary: Database readiness check
+      responses:
+        '200':
+          description: MySQL is reachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+components:
+  securitySchemes:
+    OrganizationBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Organization-signed JWT containing organizationId and adminId claims.
+    ApplicationBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Application-signed JWT containing applicationId and adminId claims.
+  parameters:
+    ApplicationId:
+      name: applicationId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/ObjectId' }
+    CommentId:
+      name: commentId
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/ObjectId' }
+  responses:
+    BadRequest:
+      description: Invalid JSON, duplicate resource, invalid credentials format, or invalid application ID.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unauthorized:
+      description: Missing, invalid, expired, or wrong-scope bearer credentials, or invalid login credentials.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: The authenticated caller does not own the comment.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    CommentNotFound:
+      description: Comment does not exist, was removed, or is outside the authenticated application scope.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    PageNotFound:
+      description: Requested page is beyond the result set. The data field contains pageInfo.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PageErrorEnvelope' }
+    InvalidInput:
+      description: Invalid fields, query values, or identifier.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    TooLarge:
+      description: Request body exceeds MAX_BODY_BYTES.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    UnsupportedMediaType:
+      description: Request uses an unsupported Content-Encoding.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    RateLimited:
+      description: Per-IP request limit exceeded; response includes Retry-After.
+      headers:
+        Retry-After:
+          schema: { type: integer, example: 60 }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    InternalError:
+      description: Internal server error.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ServiceUnavailable:
+      description: MySQL readiness check failed.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+  schemas:
+    ObjectId:
+      type: string
+      pattern: '^[0-9a-fA-F]{24}$'
+      example: 0123456789abcdef01234567
+    CreateOrganizationRequest:
+      type: object
+      required: [organizationName, organizationEmail, secret, adminName, adminEmail, adminPassword]
+      properties:
+        organizationName: { type: string, minLength: 6, maxLength: 255 }
+        organizationEmail: { type: string, format: email, maxLength: 320 }
+        secret: { type: string, minLength: 6, description: Organization secret used by the compatible signup contract. }
+        adminName: { type: string, minLength: 6, maxLength: 255 }
+        adminEmail: { type: string, format: email, maxLength: 320 }
+        adminPassword: { type: string, minLength: 6, description: UTF-8 byte length must not exceed bcrypt's 72-byte limit. }
+    OrganizationTokenRequest:
+      type: object
+      required: [organizationId, email, password]
+      properties:
+        organizationId: { $ref: '#/components/schemas/ObjectId' }
+        email: { type: string, format: email, maxLength: 320 }
+        password: { type: string, minLength: 6, description: UTF-8 byte length must not exceed bcrypt's 72-byte limit. }
+    CreateApplicationRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 255 }
+    CreateCommentRequest:
+      type: object
+      required: [ownerId, content]
+      properties:
+        ownerId: { type: string, minLength: 1 }
+        content: { type: string, minLength: 1 }
+        refId: { type: string, minLength: 1 }
+        origin: { type: string, minLength: 1 }
+    UpdateCommentRequest:
+      type: object
+      required: [ownerId, content]
+      properties:
+        ownerId: { type: string, minLength: 1 }
+        content: { type: string, minLength: 1 }
+    DeleteCommentRequest:
+      type: object
+      required: [ownerId]
+      properties:
+        ownerId: { type: string, minLength: 1 }
+    OrganizationCreated:
+      type: object
+      required: [organizationId, adminId, organizationToken]
+      properties:
+        organizationId: { $ref: '#/components/schemas/ObjectId' }
+        adminId: { $ref: '#/components/schemas/ObjectId' }
+        organizationToken: { type: string }
+    OrganizationToken:
+      type: object
+      required: [organizationToken]
+      properties:
+        organizationToken: { type: string }
+    ApplicationCreated:
+      type: object
+      required: [applicationId, applicationToken]
+      properties:
+        applicationId: { $ref: '#/components/schemas/ObjectId' }
+        applicationToken: { type: string }
+    ApplicationToken:
+      type: object
+      required: [applicationToken]
+      properties:
+        applicationToken: { type: string }
+    Comment:
+      type: object
+      required: [commentId, applicationId, ownerId, content, numOfVotes, numOfUpVotes, numOfDownVotes, numOfFlags, numOfReplies, createdAt, updatedAt]
+      properties:
+        commentId: { $ref: '#/components/schemas/ObjectId' }
+        applicationId: { $ref: '#/components/schemas/ObjectId' }
+        ownerId: { type: string }
+        content: { type: string }
+        refId: { type: string }
+        origin: { type: string }
+        numOfVotes: { type: integer, minimum: 0, description: Sum of up-vote and down-vote counts. }
+        numOfUpVotes: { type: integer, minimum: 0 }
+        numOfDownVotes: { type: integer, minimum: 0 }
+        numOfFlags: { type: integer, minimum: 0 }
+        numOfReplies: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time, example: '2026-01-02T03:04:05.006Z' }
+        updatedAt: { type: string, format: date-time, example: '2026-01-02T03:04:05.006Z' }
+    CommentUpdated:
+      type: object
+      required: [content, ownerId, updatedAt]
+      properties:
+        content: { type: string }
+        ownerId: { type: string }
+        updatedAt: { type: string, format: date-time }
+    CommentPage:
+      type: object
+      required: [records, pageInfo]
+      properties:
+        records:
+          type: array
+          items: { $ref: '#/components/schemas/Comment' }
+        pageInfo: { $ref: '#/components/schemas/PageInfo' }
+    PageInfo:
+      type: object
+      required: [currentPage, totalPages, hasNext, hasPrev, nextPage, prevPage, pageRecordCount, totalRecord]
+      properties:
+        currentPage: { type: integer }
+        totalPages: { type: integer, minimum: 1 }
+        hasNext: { type: boolean }
+        hasPrev: { type: boolean }
+        nextPage: { type: integer, nullable: true }
+        prevPage: { type: integer, nullable: true }
+        pageRecordCount: { type: integer, minimum: 0 }
+        totalRecord: { type: integer, minimum: 0 }
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    SuccessEnvelope:
+      type: object
+      required: [data, status, message]
+      properties:
+        data: {}
+        status: { type: string, enum: [success] }
+        message: { type: string }
+    ErrorEnvelope:
+      type: object
+      required: [status, error, data]
+      properties:
+        status: { type: string, enum: [error] }
+        error: { type: string }
+        data:
+          oneOf:
+            - type: array
+              items: { type: string }
+            - type: object
+    PageErrorEnvelope:
+      type: object
+      required: [status, error, data]
+      properties:
+        status: { type: string, enum: [error] }
+        error: { type: string }
+        data: { $ref: '#/components/schemas/PageInfo' }
