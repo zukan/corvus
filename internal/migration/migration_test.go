@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -34,10 +35,16 @@ func (f fakeSource) Iterate(ctx context.Context, collection string, visit func(b
 type fakeSink struct {
 	migrated int
 	rows     map[string]map[string]any
+	putError error
+	putCalls int
 }
 
 func (f *fakeSink) Migrate(context.Context) error { f.migrated++; return nil }
 func (f *fakeSink) PutImported(_ context.Context, kind string, value any) (bool, error) {
+	f.putCalls++
+	if f.putError != nil && f.putCalls == 2 {
+		return false, f.putError
+	}
 	if f.rows == nil {
 		f.rows = map[string]map[string]any{}
 	}
@@ -62,6 +69,106 @@ func (f *fakeSink) PutImported(_ context.Context, kind string, value any) (bool,
 	}
 	f.rows[kind][id] = value
 	return true, nil
+}
+
+func TestRunRejectsOrphanBeforeAnyWrites(t *testing.T) {
+	now := time.Now()
+	orgID := bson.NewObjectID()
+	source := fakeSource{
+		"organizations": {{"_id": orgID, "name": "n", "email": "e", "secret": testBcryptHash(t), "createdAt": now, "updatedAt": now}},
+		"admins":        {{"_id": bson.NewObjectID(), "organizationId": bson.NewObjectID(), "fullname": "f", "email": "e", "password": testBcryptHash(t), "createdAt": now, "updatedAt": now}},
+	}
+	sink := &fakeSink{}
+	counts, err := Run(context.Background(), source, sink, false)
+	if err == nil || !strings.Contains(err.Error(), "admins record 1") {
+		t.Fatalf("expected sanitized orphan location, got counts=%#v err=%v", counts, err)
+	}
+	if sink.migrated != 0 || sink.putCalls != 0 || len(sink.rows) != 0 {
+		t.Fatalf("orphan preflight allowed writes: migrated=%d puts=%d rows=%#v", sink.migrated, sink.putCalls, sink.rows)
+	}
+}
+
+func TestRunRejectsEveryOrphanParentType(t *testing.T) {
+	now := time.Now()
+	orgID, otherOrgID, adminID := bson.NewObjectID(), bson.NewObjectID(), bson.NewObjectID()
+	org := bson.M{"_id": orgID, "name": "n", "email": "org@example.invalid", "secret": testBcryptHash(t), "createdAt": now, "updatedAt": now}
+	admin := bson.M{"_id": adminID, "organizationId": orgID, "fullname": "f", "email": "admin@example.invalid", "password": testBcryptHash(t), "createdAt": now, "updatedAt": now}
+	tests := []struct {
+		name       string
+		source     fakeSource
+		collection string
+	}{
+		{
+			name:       "admin organization",
+			source:     fakeSource{"admins": {{"_id": bson.NewObjectID(), "organizationId": otherOrgID, "fullname": "f", "email": "admin@example.invalid", "password": testBcryptHash(t), "createdAt": now, "updatedAt": now}}},
+			collection: "admins",
+		},
+		{
+			name:       "application organization",
+			source:     fakeSource{"organizations": {org}, "admins": {admin}, "applications": {{"_id": bson.NewObjectID(), "organizationId": otherOrgID, "createdBy": adminID, "name": "app", "createdAt": now, "updatedAt": now}}},
+			collection: "applications",
+		},
+		{
+			name:       "comment application",
+			source:     fakeSource{"comments": {{"_id": bson.NewObjectID(), "applicationId": bson.NewObjectID(), "ownerId": "owner", "content": "body", "createdAt": now, "updatedAt": now}}},
+			collection: "comments",
+		},
+		{
+			name:       "reply comment",
+			source:     fakeSource{"replies": {{"_id": bson.NewObjectID(), "commentId": bson.NewObjectID(), "ownerId": "owner", "content": "reply", "createdAt": now, "updatedAt": now}}},
+			collection: "replies",
+		},
+		{
+			name:       "application creator",
+			source:     fakeSource{"organizations": {org}, "applications": {{"_id": bson.NewObjectID(), "organizationId": orgID, "createdBy": bson.NewObjectID(), "name": "app", "createdAt": now, "updatedAt": now}}},
+			collection: "applications",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			counts, err := Run(context.Background(), tt.source, &fakeSink{}, true)
+			if err == nil || !strings.Contains(err.Error(), tt.collection+" record 1") {
+				t.Fatalf("expected sanitized %s parent location, got counts=%#v err=%v", tt.collection, counts, err)
+			}
+		})
+	}
+}
+
+func TestRunRejectsApplicationCreatedByAnotherTenant(t *testing.T) {
+	now := time.Now()
+	orgA, orgB, adminB := bson.NewObjectID(), bson.NewObjectID(), bson.NewObjectID()
+	source := fakeSource{
+		"organizations": {
+			{"_id": orgA, "name": "a", "email": "a@example.invalid", "secret": testBcryptHash(t), "createdAt": now, "updatedAt": now},
+			{"_id": orgB, "name": "b", "email": "b@example.invalid", "secret": testBcryptHash(t), "createdAt": now, "updatedAt": now},
+		},
+		"admins":       {{"_id": adminB, "organizationId": orgB, "fullname": "b", "email": "b-admin@example.invalid", "password": testBcryptHash(t), "createdAt": now, "updatedAt": now}},
+		"applications": {{"_id": bson.NewObjectID(), "organizationId": orgA, "createdBy": adminB, "name": "cross-tenant", "createdAt": now, "updatedAt": now}},
+	}
+	sink := &fakeSink{}
+	counts, err := Run(context.Background(), source, sink, false)
+	if err == nil || !strings.Contains(err.Error(), "applications record 1") {
+		t.Fatalf("expected sanitized cross-tenant location, got counts=%#v err=%v", counts, err)
+	}
+	if sink.migrated != 0 || sink.putCalls != 0 {
+		t.Fatalf("cross-tenant reference allowed writes: migrated=%d puts=%d", sink.migrated, sink.putCalls)
+	}
+}
+
+func TestRunReturnsCountsIncludingCurrentCollectionOnInsertFailure(t *testing.T) {
+	now := time.Now()
+	source := fakeSource{"organizations": {
+		{"_id": bson.NewObjectID(), "name": "one", "email": "one@example.invalid", "secret": testBcryptHash(t), "createdAt": now, "updatedAt": now},
+		{"_id": bson.NewObjectID(), "name": "two", "email": "two@example.invalid", "secret": testBcryptHash(t), "createdAt": now, "updatedAt": now},
+	}}
+	sink := &fakeSink{putError: errors.New("storage failure")}
+	counts, err := Run(context.Background(), source, sink, false)
+	if err == nil || !strings.Contains(err.Error(), "insert organizations record 2") {
+		t.Fatalf("expected sanitized insert location, got counts=%#v err=%v", counts, err)
+	}
+	if got := counts["organizations"]; got.Read != 2 || got.Inserted != 1 || got.Skipped != 0 {
+		t.Fatalf("partial counts missing current collection: %#v", counts)
+	}
 }
 
 func TestConvertPreservesObjectIDTimesAndDeletedState(t *testing.T) {

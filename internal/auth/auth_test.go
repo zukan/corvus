@@ -8,16 +8,18 @@ import (
 	"time"
 
 	jwt "github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestNewRequiresNonemptyBase64Secrets(t *testing.T) {
+	strong := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32)))
 	for _, tc := range []struct{ name, app, org string }{
-		{"empty application", "", base64.StdEncoding.EncodeToString([]byte("org"))},
-		{"empty decoded application", base64.StdEncoding.EncodeToString(nil), base64.StdEncoding.EncodeToString([]byte("org"))},
-		{"invalid application", "%%%", base64.StdEncoding.EncodeToString([]byte("org"))},
-		{"empty organization", base64.StdEncoding.EncodeToString([]byte("app")), ""},
-		{"empty decoded organization", base64.StdEncoding.EncodeToString([]byte("app")), base64.StdEncoding.EncodeToString(nil)},
-		{"invalid organization", base64.StdEncoding.EncodeToString([]byte("app")), "%%%"},
+		{"empty application", "", strong},
+		{"empty decoded application", base64.StdEncoding.EncodeToString(nil), strong},
+		{"invalid application", "%%%", strong},
+		{"empty organization", strong, ""},
+		{"empty decoded organization", strong, base64.StdEncoding.EncodeToString(nil)},
+		{"invalid organization", strong, "%%%"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := New(tc.app, tc.org, time.Hour, true); err == nil {
@@ -27,8 +29,22 @@ func TestNewRequiresNonemptyBase64Secrets(t *testing.T) {
 	}
 }
 
+func TestNewRejectsSecretsShorterThanHS256Minimum(t *testing.T) {
+	weak := base64.StdEncoding.EncodeToString([]byte{0x01})
+	strong := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32)))
+	if _, err := New(weak, strong, time.Hour, true); err == nil {
+		t.Fatal("accepted application signing key shorter than 32 decoded bytes")
+	}
+	if _, err := New(strong, weak, time.Hour, true); err == nil {
+		t.Fatal("accepted organization signing key shorter than 32 decoded bytes")
+	}
+	if _, err := New(strong, strong, time.Hour, true); err != nil {
+		t.Fatalf("rejected 32-byte signing keys: %v", err)
+	}
+}
+
 func TestNewRequiresPositiveTTL(t *testing.T) {
-	secret := base64.StdEncoding.EncodeToString([]byte("secret"))
+	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32)))
 	for _, ttl := range []time.Duration{0, -time.Second} {
 		if _, err := New(secret, secret, ttl, true); err == nil {
 			t.Fatalf("New accepted ttl %s", ttl)
@@ -67,7 +83,7 @@ func TestParseRejectsWrongAlgorithmAndWrongTenantKey(t *testing.T) {
 
 func TestParseValidatesExpirationAndNotBeforeWhenPresent(t *testing.T) {
 	s := newService(t, true)
-	key := []byte("application-secret")
+	key := []byte(strings.Repeat("a", 32))
 	for _, tc := range []struct {
 		name   string
 		claims jwt.MapClaims
@@ -90,7 +106,7 @@ func TestParseValidatesExpirationAndNotBeforeWhenPresent(t *testing.T) {
 
 func TestParseMapsJWTErrorsToLegacyMessages(t *testing.T) {
 	s := newService(t, true)
-	key := []byte("application-secret")
+	key := []byte(strings.Repeat("a", 32))
 	makeSigned := func(method jwt.SigningMethod, claims jwt.Claims, signingKey []byte) string {
 		t.Helper()
 		token := jwt.NewWithClaims(method, claims)
@@ -166,9 +182,6 @@ func TestPasswordHelpersRejectOverlongPasswordsAndVerifyBcrypt(t *testing.T) {
 	if _, err := HashPassword(password); err == nil {
 		t.Fatal("expected overlong password error")
 	}
-	if err := ComparePassword("$2a$invalid", strings.Repeat("x", 73)); err == nil {
-		t.Fatal("expected overlong compare error")
-	}
 	hash, err := HashPassword("correct horse")
 	if err != nil {
 		t.Fatal(err)
@@ -178,6 +191,17 @@ func TestPasswordHelpersRejectOverlongPasswordsAndVerifyBcrypt(t *testing.T) {
 	}
 	if err := ComparePassword(hash, "wrong"); err == nil {
 		t.Fatal("accepted wrong password")
+	}
+}
+
+func TestComparePasswordVerifiesLegacyBcryptTruncation(t *testing.T) {
+	legacyPassword := strings.Repeat("x", 72)
+	hash, err := bcrypt.GenerateFromPassword([]byte(legacyPassword), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ComparePassword(string(hash), legacyPassword+"legacy-suffix"); err != nil {
+		t.Fatalf("failed to verify legacy bcrypt-truncated password: %v", err)
 	}
 }
 
@@ -194,7 +218,7 @@ func makeToken(t *testing.T, alg string, _, _ any) string {
 
 func newService(t *testing.T, required bool) *Service {
 	t.Helper()
-	s, err := New(base64.StdEncoding.EncodeToString([]byte("application-secret")), base64.StdEncoding.EncodeToString([]byte("organization-secret")), time.Hour, required)
+	s, err := New(base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32))), base64.StdEncoding.EncodeToString([]byte(strings.Repeat("o", 32))), time.Hour, required)
 	if err != nil {
 		t.Fatal(err)
 	}

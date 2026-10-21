@@ -65,7 +65,7 @@ func readLegacyPairs(t *testing.T) legacyPairs {
 	return pairs
 }
 
-func newCompatibilityServer(t *testing.T, pairs legacyPairs) (http.Handler, string) {
+func newCompatibilityServer(t *testing.T, pairs legacyPairs, extra ...repository.Comment) (http.Handler, string) {
 	t.Helper()
 	ctx := context.Background()
 	repo := repository.NewMemory()
@@ -87,7 +87,7 @@ func newCompatibilityServer(t *testing.T, pairs legacyPairs) (http.Handler, stri
 	if err := repo.CreateApplication(ctx, repository.Application{ID: "64a000000000000000000002", OrganizationID: foreignOrgID, CreatedBy: foreignAdminID, Name: "Other app"}); err != nil {
 		t.Fatal(err)
 	}
-	secret := base64.StdEncoding.EncodeToString([]byte("compatibility-secret"))
+	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("c", 32)))
 	tokens, err := auth.New(secret, secret, 720*time.Hour, true)
 	if err != nil {
 		t.Fatal(err)
@@ -104,11 +104,11 @@ func newCompatibilityServer(t *testing.T, pairs legacyPairs) (http.Handler, stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []repository.Comment{
+	for _, c := range append([]repository.Comment{
 		{ID: pairs.Seed.CommentID, ApplicationID: pairs.Seed.ApplicationID, RefID: strptr(pairs.Seed.Comment.RefID), OwnerID: pairs.Seed.Comment.OwnerID, Content: pairs.Seed.Comment.Content, Origin: strptr(pairs.Seed.Comment.Origin), Flags: pairs.Seed.Comment.Flags, UpVotes: pairs.Seed.Comment.UpVotes, DownVotes: pairs.Seed.Comment.DownVotes, Replies: pairs.Seed.Comment.Replies, CreatedAt: createdAt, UpdatedAt: createdAt},
 		{ID: pairs.Seed.OtherCommentID, ApplicationID: pairs.Seed.ApplicationID, RefID: strptr(pairs.Seed.OtherComment.RefID), OwnerID: pairs.Seed.OtherComment.OwnerID, Content: pairs.Seed.OtherComment.Content, Origin: strptr(pairs.Seed.OtherComment.Origin), Flags: pairs.Seed.OtherComment.Flags, UpVotes: pairs.Seed.OtherComment.UpVotes, DownVotes: pairs.Seed.OtherComment.DownVotes, Replies: pairs.Seed.OtherComment.Replies, CreatedAt: otherCreatedAt, UpdatedAt: otherCreatedAt},
 		{ID: pairs.Seed.ForeignCommentID, ApplicationID: "64a000000000000000000002", RefID: strptr("private-ref"), OwnerID: "other@example.com", Content: "Private tenant comment", Origin: strptr("web"), CreatedAt: createdAt, UpdatedAt: createdAt},
-	} {
+	}, extra...) {
 		if err := repo.CreateComment(ctx, c); err != nil {
 			t.Fatal(err)
 		}

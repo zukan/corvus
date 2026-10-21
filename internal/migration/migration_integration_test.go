@@ -26,6 +26,105 @@ func (s *dryRunSpy) PutImported(context.Context, string, any) (bool, error) {
 	return true, nil
 }
 
+type trackingSink struct {
+	target     Sink
+	migrations int
+	writes     int
+}
+
+func (s *trackingSink) Migrate(ctx context.Context) error {
+	s.migrations++
+	return s.target.Migrate(ctx)
+}
+func (s *trackingSink) PutImported(ctx context.Context, collection string, value any) (bool, error) {
+	s.writes++
+	return s.target.PutImported(ctx, collection, value)
+}
+
+func TestOrphanMongoInputDoesNotTouchLiveMySQLIntegration(t *testing.T) {
+	mongoURI := os.Getenv("MONGO_TEST_URI")
+	mysqlDSN := os.Getenv("MYSQL_TEST_DSN")
+	if mongoURI == "" || mysqlDSN == "" {
+		t.Skip("set MONGO_TEST_URI and MYSQL_TEST_DSN to isolated disposable services")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	dbName := "corvus_orphan_" + strings.ToLower(bson.NewObjectID().Hex())
+	source, err := OpenMongo(ctx, mongoURI, dbName)
+	if err != nil {
+		t.Fatal("open Mongo test service failed")
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_ = source.database.Drop(cleanupCtx)
+		_ = source.Close(cleanupCtx)
+	}()
+
+	targetConfig, err := mysql.ParseDSN(mysqlDSN)
+	if err != nil {
+		t.Fatal("parse disposable MySQL test DSN failed")
+	}
+	targetDatabase := "corvus_orphan_" + strings.ToLower(bson.NewObjectID().Hex())
+	targetConfig.DBName = ""
+	adminDB, err := sql.Open("mysql", targetConfig.FormatDSN())
+	if err != nil {
+		t.Fatal("open disposable MySQL setup connection failed")
+	}
+	defer adminDB.Close()
+	if err = adminDB.PingContext(ctx); err != nil {
+		t.Fatal("connect to disposable MySQL test service failed")
+	}
+	if _, err = adminDB.ExecContext(ctx, "CREATE DATABASE `"+targetDatabase+"`"); err != nil {
+		t.Fatal("create isolated MySQL test database failed")
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = adminDB.ExecContext(cleanupCtx, "DROP DATABASE IF EXISTS `"+targetDatabase+"`")
+	}()
+	targetConfig.DBName = targetDatabase
+	target, err := repository.Open(ctx, targetConfig.FormatDSN())
+	if err != nil {
+		t.Fatal("open isolated MySQL test database failed")
+	}
+	defer target.Close()
+	spy := &trackingSink{target: target}
+
+	now := time.Now().UTC()
+	orgID := bson.NewObjectID()
+	if _, err := source.database.Collection("organizations").InsertOne(ctx, bson.M{
+		"_id": orgID, "name": "Synthetic Org", "email": "org-" + orgID.Hex() + "@example.invalid",
+		"secret": integrationHash(t, "synthetic-secret"), "createdAt": now, "updatedAt": now,
+	}); err != nil {
+		t.Fatal("insert synthetic organization failed")
+	}
+	if _, err := source.database.Collection("comments").InsertOne(ctx, bson.M{
+		"_id": bson.NewObjectID(), "applicationId": bson.NewObjectID(), "ownerId": "synthetic-owner",
+		"content": "orphan comment", "createdAt": now, "updatedAt": now,
+	}); err != nil {
+		t.Fatal("insert synthetic orphan comment failed")
+	}
+
+	for _, dryRun := range []bool{true, false} {
+		counts, runErr := Run(ctx, source, spy, dryRun)
+		if runErr == nil || !strings.Contains(runErr.Error(), "comments record 1") {
+			t.Fatalf("dryRun=%t: expected sanitized orphan location, got counts=%#v err=%v", dryRun, counts, runErr)
+		}
+		if counts["organizations"].Read != 1 || counts["comments"].Read != 1 {
+			t.Fatalf("dryRun=%t: preflight counts incomplete: %#v", dryRun, counts)
+		}
+		var tableCount int
+		if err = adminDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=?", targetDatabase).Scan(&tableCount); err != nil {
+			t.Fatal("inspect isolated MySQL schema failed")
+		}
+		if spy.migrations != 0 || spy.writes != 0 || tableCount != 0 {
+			t.Fatalf("dryRun=%t: orphan input touched MySQL: migrations=%d writes=%d tables=%d", dryRun, spy.migrations, spy.writes, tableCount)
+		}
+	}
+}
+
 func TestMongoToMySQLIntegration(t *testing.T) {
 	mongoURI := os.Getenv("MONGO_TEST_URI")
 	mysqlDSN := os.Getenv("MYSQL_TEST_DSN")

@@ -27,6 +27,17 @@ func parseMySQLConfig(dsn string) (*mysql.Config, error) {
 	}
 	cfg.ParseTime = true
 	cfg.Loc = time.UTC
+	// Keep connections bounded even for callers outside the HTTP server. Request
+	// contexts may impose a shorter deadline; positive DSN overrides are honored.
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 5 * time.Second
+	}
+	if cfg.ReadTimeout <= 0 {
+		cfg.ReadTimeout = 10 * time.Second
+	}
+	if cfg.WriteTimeout <= 0 {
+		cfg.WriteTimeout = 10 * time.Second
+	}
 	return cfg, nil
 }
 func Open(ctx context.Context, dsn string) (*MySQL, error) {
@@ -49,6 +60,45 @@ func Open(ctx context.Context, dsn string) (*MySQL, error) {
 }
 func (m *MySQL) Close() error                   { return m.db.Close() }
 func (m *MySQL) Ping(ctx context.Context) error { return m.db.PingContext(ctx) }
+func latestSchemaVersion() (string, error) {
+	files, err := fs.ReadDir(migrationFiles, "migrations")
+	if err != nil {
+		return "", err
+	}
+	if len(files) == 0 {
+		return "", errors.New("no migrations are defined")
+	}
+	return strings.TrimSuffix(files[len(files)-1].Name(), ".sql"), nil
+}
+func (m *MySQL) Ready(ctx context.Context) error {
+	if err := m.db.PingContext(ctx); err != nil {
+		return err
+	}
+	requiredVersion, err := latestSchemaVersion()
+	if err != nil {
+		return fmt.Errorf("required schema version is unavailable: %w", err)
+	}
+	var appliedVersion string
+	if err := m.db.QueryRowContext(ctx, "SELECT version FROM schema_migrations WHERE version=?", requiredVersion).Scan(&appliedVersion); err != nil {
+		return fmt.Errorf("required schema migration %s is unavailable: %w", requiredVersion, err)
+	}
+	for _, query := range []string{
+		"SELECT id,name,email,secret,created_at,updated_at,deleted,deleted_at FROM organizations LIMIT 0",
+		"SELECT id,organization_id,fullname,email,password,created_at,updated_at FROM admins LIMIT 0",
+		"SELECT id,organization_id,created_by,name,created_at,updated_at,deleted,deleted_at FROM applications LIMIT 0",
+		"SELECT id,application_id,owner_id,content,ref_id,origin,replies,flags,up_votes,down_votes,created_at,updated_at,deleted,deleted_at FROM comments LIMIT 0",
+		"SELECT id,comment_id,owner_id,content,flags,up_votes,down_votes,created_at,updated_at,deleted,deleted_at FROM comment_replies LIMIT 0",
+	} {
+		rows, err := m.db.QueryContext(ctx, query)
+		if err != nil {
+			return fmt.Errorf("required schema is unavailable: %w", err)
+		}
+		if err = rows.Close(); err != nil {
+			return fmt.Errorf("required schema check failed: %w", err)
+		}
+	}
+	return nil
+}
 func (m *MySQL) Migrate(ctx context.Context) error {
 	conn, err := m.db.Conn(ctx)
 	if err != nil {

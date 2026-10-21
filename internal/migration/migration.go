@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/zukan/corvus/internal/repository"
@@ -25,12 +26,33 @@ type Counts struct {
 	Skipped  int
 }
 
+type stagedRecord struct {
+	collection string
+	index      int
+	offset     int64
+	length     int
+}
+
+type relationRecord struct {
+	collection, id, organizationID, parentID, createdBy string
+	index                                               int
+}
+
 func Run(ctx context.Context, source Source, sink Sink, dryRun bool) (map[string]Counts, error) {
 	report := make(map[string]Counts, len(collections))
+	var staged []stagedRecord
+	var relations []relationRecord
+	var spool *os.File
 	if !dryRun {
-		if err := sink.Migrate(ctx); err != nil {
-			return nil, fmt.Errorf("schema migration failed")
+		var err error
+		spool, err = os.CreateTemp("", "corvus-migration-*.bson")
+		if err != nil {
+			return report, fmt.Errorf("preflight staging failed")
 		}
+		defer func() {
+			_ = spool.Close()
+			_ = os.Remove(spool.Name())
+		}()
 	}
 	for _, collection := range collections {
 		var count Counts
@@ -39,6 +61,7 @@ func Run(ctx context.Context, source Source, sink Sink, dryRun bool) (map[string
 		err := source.Iterate(ctx, collection, func(doc bson.M) error {
 			index++
 			count.Read++
+			report[collection] = count
 			value, err := convert(collection, doc)
 			if err != nil {
 				recordErr = fmt.Errorf("convert %s record %d failed", collection, index)
@@ -48,30 +71,143 @@ func Run(ctx context.Context, source Source, sink Sink, dryRun bool) (map[string
 				recordErr = fmt.Errorf("validate %s record %d failed", collection, index)
 				return recordErr
 			}
-			if dryRun {
-				return nil
+			relation, ok := relationFor(collection, index, value)
+			if ok {
+				relations = append(relations, relation)
 			}
-			inserted, err := sink.PutImported(ctx, collection, value)
-			if err != nil {
-				recordErr = fmt.Errorf("insert %s record %d failed", collection, index)
-				return recordErr
+			record := stagedRecord{collection: collection, index: index}
+			if !dryRun {
+				raw, marshalErr := bson.Marshal(doc)
+				if marshalErr != nil {
+					recordErr = fmt.Errorf("stage %s record %d failed", collection, index)
+					return recordErr
+				}
+				record.offset, err = spool.Seek(0, 1)
+				if err != nil {
+					recordErr = fmt.Errorf("stage %s record %d failed", collection, index)
+					return recordErr
+				}
+				record.length = len(raw)
+				if _, err = spool.Write(raw); err != nil {
+					recordErr = fmt.Errorf("stage %s record %d failed", collection, index)
+					return recordErr
+				}
 			}
-			if inserted {
-				count.Inserted++
-			} else {
-				count.Skipped++
-			}
+			staged = append(staged, record)
 			return nil
 		})
 		if err != nil {
 			if recordErr != nil {
-				return nil, recordErr
+				return report, recordErr
 			}
-			return nil, fmt.Errorf("read %s failed", collection)
+			return report, fmt.Errorf("read %s failed", collection)
 		}
 		report[collection] = count
 	}
+	if err := validateRelationships(relations); err != nil {
+		return report, err
+	}
+	if dryRun {
+		return report, nil
+	}
+	if err := spool.Sync(); err != nil {
+		return report, fmt.Errorf("preflight staging failed")
+	}
+	for _, record := range staged {
+		if _, err := readStaged(spool, record); err != nil {
+			return report, fmt.Errorf("stage %s record %d failed", record.collection, record.index)
+		}
+	}
+	if err := sink.Migrate(ctx); err != nil {
+		return report, fmt.Errorf("schema migration failed")
+	}
+	for _, record := range staged {
+		value, err := readStaged(spool, record)
+		if err != nil {
+			return report, fmt.Errorf("stage %s record %d failed", record.collection, record.index)
+		}
+		inserted, err := sink.PutImported(ctx, record.collection, value)
+		if err != nil {
+			return report, fmt.Errorf("insert %s record %d failed", record.collection, record.index)
+		}
+		count := report[record.collection]
+		if inserted {
+			count.Inserted++
+		} else {
+			count.Skipped++
+		}
+		report[record.collection] = count
+	}
 	return report, nil
+}
+
+func relationFor(collection string, index int, value any) (relationRecord, bool) {
+	record := relationRecord{collection: collection, index: index}
+	switch v := value.(type) {
+	case repository.Organization:
+		record.id = v.ID
+	case repository.Admin:
+		record.id, record.organizationID = v.ID, v.OrganizationID
+	case repository.Application:
+		record.id, record.organizationID, record.createdBy = v.ID, v.OrganizationID, v.CreatedBy
+	case repository.Comment:
+		record.id, record.parentID = v.ID, v.ApplicationID
+	case repository.Reply:
+		record.id, record.parentID = v.ID, v.CommentID
+	default:
+		return relationRecord{}, false
+	}
+	return record, true
+}
+
+func validateRelationships(records []relationRecord) error {
+	organizations := map[string]struct{}{}
+	admins := map[string]string{}
+	applications := map[string]struct{}{}
+	comments := map[string]struct{}{}
+	for _, record := range records {
+		switch record.collection {
+		case "organizations":
+			organizations[record.id] = struct{}{}
+		case "admins":
+			admins[record.id] = record.organizationID
+		case "applications":
+			applications[record.id] = struct{}{}
+		case "comments":
+			comments[record.id] = struct{}{}
+		}
+	}
+	for _, record := range records {
+		valid := true
+		switch record.collection {
+		case "admins":
+			_, valid = organizations[record.organizationID]
+		case "applications":
+			_, orgExists := organizations[record.organizationID]
+			adminOrg, adminExists := admins[record.createdBy]
+			valid = orgExists && adminExists && adminOrg == record.organizationID
+		case "comments":
+			_, valid = applications[record.parentID]
+		case "replies":
+			_, valid = comments[record.parentID]
+		}
+		if !valid {
+			return fmt.Errorf("relationship %s record %d failed", record.collection, record.index)
+		}
+	}
+	return nil
+}
+
+func readStaged(file *os.File, record stagedRecord) (any, error) {
+	raw := make([]byte, record.length)
+	if _, err := file.ReadAt(raw, record.offset); err != nil {
+		return nil, err
+	}
+	var document bson.M
+	if err := bson.Unmarshal(raw, &document); err != nil {
+		return nil, err
+	}
+	return convert(record.collection, document)
 }
 
 func convert(kind string, d bson.M) (any, error) {

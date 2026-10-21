@@ -21,6 +21,7 @@ func NewMemory() *Memory {
 }
 func check(ctx context.Context) error               { return ctx.Err() }
 func (m *Memory) Ping(ctx context.Context) error    { return check(ctx) }
+func (m *Memory) Ready(ctx context.Context) error   { return check(ctx) }
 func (m *Memory) Close() error                      { return nil }
 func (m *Memory) Migrate(ctx context.Context) error { return check(ctx) }
 func (m *Memory) CreateOrganization(ctx context.Context, o Organization, a Admin) error {

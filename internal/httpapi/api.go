@@ -46,7 +46,7 @@ func New(repo repository.Repository, tokens *auth.Service, cfg config.Config, lo
 	m.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
-		if err := repo.Ping(ctx); err != nil {
+		if err := repo.Ready(ctx); err != nil {
 			failure(w, 503, "Service unavailable", nil)
 			return
 		}
@@ -63,7 +63,7 @@ func New(repo repository.Repository, tokens *auth.Service, cfg config.Config, lo
 	m.HandleFunc("DELETE /v1/comments/{commentId}", a.deleteComment)
 	// A JSON fallback also covers methods outside the supported compatibility surface.
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { failure(w, 404, "Not found", nil) })
-	return a.middleware(m)
+	return a.withDeadline(a.middleware(m))
 }
 func write(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

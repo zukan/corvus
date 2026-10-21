@@ -55,8 +55,8 @@ func decodeSecret(encoded string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(key) == 0 {
-		return nil, errors.New("secret must not be empty")
+	if len(key) < 32 {
+		return nil, errors.New("secret must be at least 32 decoded bytes")
 	}
 	return key, nil
 }
@@ -147,8 +147,5 @@ func HashPassword(password string) (string, error) {
 }
 
 func ComparePassword(hash, password string) error {
-	if len([]byte(password)) > 72 {
-		return errors.New("password exceeds bcrypt's 72-byte limit")
-	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }

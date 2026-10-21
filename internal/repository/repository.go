@@ -53,6 +53,7 @@ type Filter struct {
 
 type Repository interface {
 	Ping(context.Context) error
+	Ready(context.Context) error
 	CreateOrganization(context.Context, Organization, Admin) error
 	GetOrganization(context.Context, string) (Organization, error)
 	FindAdmin(context.Context, string, string) (Admin, error)

@@ -20,10 +20,12 @@ type Config struct {
 	ReadTimeout         time.Duration
 	ReadHeaderTimeout   time.Duration
 	WriteTimeout        time.Duration
+	RequestTimeout      time.Duration
 	IdleTimeout         time.Duration
 	ShutdownTimeout     time.Duration
 	MaxBodyBytes        int64
 	RateLimit           int
+	IPv6RateLimitPrefix int
 	CORSOrigins         []string
 	CredentialsRequired bool
 	AutoMigrate         bool
@@ -67,6 +69,9 @@ func Load() (Config, error) {
 	if cfg.WriteTimeout, err = duration("WRITE_TIMEOUT", "15s"); err != nil {
 		return Config{}, err
 	}
+	if cfg.RequestTimeout, err = duration("REQUEST_TIMEOUT", "10s"); err != nil {
+		return Config{}, err
+	}
 	if cfg.IdleTimeout, err = duration("IDLE_TIMEOUT", "60s"); err != nil {
 		return Config{}, err
 	}
@@ -77,6 +82,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.RateLimit, err = positiveInt("RATE_LIMIT", "120"); err != nil {
+		return Config{}, err
+	}
+	if cfg.IPv6RateLimitPrefix, err = boundedInt("IPV6_RATE_LIMIT_PREFIX", "64", 1, 128); err != nil {
 		return Config{}, err
 	}
 	var origins string
@@ -117,8 +125,8 @@ func required(name string) (string, error) {
 
 func validateSecret(name, encoded string) error {
 	secret, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(secret) == 0 {
-		return fmt.Errorf("%s must be non-empty standard base64", name)
+	if err != nil || len(secret) < 32 {
+		return fmt.Errorf("%s must be standard base64 encoding of at least 32 bytes", name)
 	}
 	return nil
 }
@@ -146,6 +154,15 @@ func positiveInt64(name, fallback string) (int64, error) {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return n, nil
+}
+
+func boundedInt(name, fallback string, min, max int) (int, error) {
+	v, _ := value(name, fallback)
+	n, err := strconv.Atoi(v)
+	if err != nil || n < min || n > max {
+		return 0, fmt.Errorf("%s must be an integer from %d through %d", name, min, max)
 	}
 	return n, nil
 }

@@ -3,19 +3,41 @@ package httpapi
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
 )
 
 type bucket struct {
-	start time.Time
-	count int
+	start    time.Time
+	lastSeen time.Time
+	count    int
 }
 type limiter struct {
-	mu      sync.Mutex
-	clients map[string]bucket
-	limit   int
+	mu         sync.Mutex
+	clients    map[string]bucket
+	limit      int
+	maxClients int
+}
+
+const maxRateLimitClients = 10000
+
+func rateLimitClientKey(addr netip.Addr, ipv6Prefix int) string {
+	if !addr.IsValid() {
+		return ""
+	}
+	addr = addr.WithZone("").Unmap()
+	if addr.Is6() {
+		if ipv6Prefix < 1 || ipv6Prefix > 128 {
+			ipv6Prefix = 64
+		}
+		prefix, err := addr.Prefix(ipv6Prefix)
+		if err == nil {
+			return prefix.Masked().String()
+		}
+	}
+	return addr.String()
 }
 
 func (l *limiter) allow(client string, now time.Time) bool {
@@ -23,19 +45,32 @@ func (l *limiter) allow(client string, now time.Time) bool {
 	defer l.mu.Unlock()
 	b, exists := l.clients[client]
 	if !exists || now.Sub(b.start) >= time.Minute {
-		b = bucket{start: now}
+		b = bucket{start: now, lastSeen: now}
 	}
-	if !exists && len(l.clients) >= 10000 {
+	capacity := l.maxClients
+	if capacity <= 0 {
+		capacity = maxRateLimitClients
+	}
+	if !exists && len(l.clients) >= capacity {
 		for k, v := range l.clients {
 			if now.Sub(v.start) >= time.Minute {
 				delete(l.clients, k)
 			}
 		}
-		if len(l.clients) >= 10000 {
-			return false
+		if len(l.clients) >= capacity {
+			oldest := ""
+			var lastSeen time.Time
+			for k, v := range l.clients {
+				if oldest == "" || v.lastSeen.Before(lastSeen) {
+					oldest, lastSeen = k, v.lastSeen
+				}
+			}
+			delete(l.clients, oldest)
 		}
 	}
+	b.lastSeen = now
 	if b.count >= l.limit {
+		l.clients[client] = b
 		return false
 	}
 	b.count++
@@ -64,6 +99,10 @@ func (w *responseWriter) Write(p []byte) (int, error) {
 func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (a *api) middleware(next http.Handler) http.Handler {
 	limits := &limiter{clients: map[string]bucket{}, limit: a.cfg.RateLimit}
+	ipv6Prefix := a.cfg.IPv6RateLimitPrefix
+	if ipv6Prefix < 1 || ipv6Prefix > 128 {
+		ipv6Prefix = 64
+	}
 	return http.HandlerFunc(func(original http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		w := &responseWriter{ResponseWriter: original}
@@ -113,6 +152,9 @@ func (a *api) middleware(next http.Handler) http.Handler {
 			ip, _, err := net.SplitHostPort(r.RemoteAddr)
 			if err != nil {
 				ip = r.RemoteAddr
+			}
+			if addr, parseErr := netip.ParseAddr(ip); parseErr == nil {
+				ip = rateLimitClientKey(addr, ipv6Prefix)
 			}
 			if !limits.allow(ip, started) {
 				w.Header().Set("Retry-After", "60")

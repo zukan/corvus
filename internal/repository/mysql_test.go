@@ -24,6 +24,49 @@ func mockedMySQL(t *testing.T) (*MySQL, sqlmock.Sqlmock) {
 }
 func q(s string) string { return regexp.QuoteMeta(s) }
 
+func TestMySQLReadyRequiresMigrationAndAccessibleTables(t *testing.T) {
+	t.Run("missing migration", func(t *testing.T) {
+		r, mock := mockedMySQL(t)
+		mock.ExpectQuery(q("SELECT version FROM schema_migrations WHERE version=?")).WithArgs("001_init").WillReturnError(sql.ErrNoRows)
+		if err := r.Ready(context.Background()); err == nil {
+			t.Fatal("Ready should fail when the required migration is absent")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("missing required column", func(t *testing.T) {
+		r, mock := mockedMySQL(t)
+		mock.ExpectQuery(q("SELECT version FROM schema_migrations WHERE version=?")).WithArgs("001_init").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("001_init"))
+		mock.ExpectQuery(q("SELECT id,name,email,secret,created_at,updated_at,deleted,deleted_at FROM organizations LIMIT 0")).WillReturnError(errors.New("unknown column"))
+		if err := r.Ready(context.Background()); err == nil {
+			t.Fatal("Ready should fail when a required column is unavailable")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("all required tables", func(t *testing.T) {
+		r, mock := mockedMySQL(t)
+		mock.ExpectQuery(q("SELECT version FROM schema_migrations WHERE version=?")).WithArgs("001_init").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("001_init"))
+		for _, query := range []string{
+			"SELECT id,name,email,secret,created_at,updated_at,deleted,deleted_at FROM organizations LIMIT 0",
+			"SELECT id,organization_id,fullname,email,password,created_at,updated_at FROM admins LIMIT 0",
+			"SELECT id,organization_id,created_by,name,created_at,updated_at,deleted,deleted_at FROM applications LIMIT 0",
+			"SELECT id,application_id,owner_id,content,ref_id,origin,replies,flags,up_votes,down_votes,created_at,updated_at,deleted,deleted_at FROM comments LIMIT 0",
+			"SELECT id,comment_id,owner_id,content,flags,up_votes,down_votes,created_at,updated_at,deleted,deleted_at FROM comment_replies LIMIT 0",
+		} {
+			mock.ExpectQuery(q(query)).WillReturnRows(sqlmock.NewRows([]string{"column"}))
+		}
+		if err := r.Ready(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestMySQLListCommentsAppliesTenantFiltersAndStablePaging(t *testing.T) {
 	r, m := mockedMySQL(t)
 	owner, ref := "owner-1", "ref-1"

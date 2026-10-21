@@ -48,6 +48,16 @@ func parseFlags(args []string, getenv func(string) string, output io.Writer) (co
 	return cfg, nil
 }
 
+func writeReport(output, errorOutput io.Writer, report map[string]migration.Counts, runErr error) {
+	for _, name := range []string{"organizations", "admins", "applications", "comments", "replies"} {
+		count := report[name]
+		fmt.Fprintf(output, "%s read=%d inserted=%d skipped=%d\n", name, count.Read, count.Inserted, count.Skipped)
+	}
+	if runErr != nil {
+		fmt.Fprintf(errorOutput, "migration failed: %v\n", runErr)
+	}
+}
+
 func main() {
 	cfg, err := parseFlags(os.Args[1:], os.Getenv, os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
@@ -92,12 +102,8 @@ func main() {
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	report, err := migration.Run(runCtx, source, sink, cfg.dryRun)
+	writeReport(os.Stdout, os.Stderr, report, err)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "migration failed")
 		os.Exit(1)
-	}
-	for _, name := range []string{"organizations", "admins", "applications", "comments", "replies"} {
-		count := report[name]
-		fmt.Printf("%s read=%d inserted=%d skipped=%d\n", name, count.Read, count.Inserted, count.Skipped)
 	}
 }

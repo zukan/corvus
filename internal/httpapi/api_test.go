@@ -173,9 +173,23 @@ func TestInvalidAndUnauthorizedRequests(t *testing.T) {
 
 type unavailableRepo struct{ repository.Repository }
 
-func (unavailableRepo) Ping(context.Context) error { return io.ErrUnexpectedEOF }
+func (unavailableRepo) Ping(context.Context) error  { return io.ErrUnexpectedEOF }
+func (unavailableRepo) Ready(context.Context) error { return io.ErrUnexpectedEOF }
 func TestReadinessFailureDoesNotExposeDatabaseError(t *testing.T) {
 	h := New(unavailableRepo{}, nil, config.Config{}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	w := call(h, "GET", "/readyz", "", "")
+	if w.Code != 503 || strings.Contains(w.Body.String(), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+type schemaUnavailableRepo struct{ repository.Repository }
+
+func (schemaUnavailableRepo) Ping(context.Context) error  { return nil }
+func (schemaUnavailableRepo) Ready(context.Context) error { return io.ErrUnexpectedEOF }
+
+func TestReadinessChecksSchemaAfterDatabasePing(t *testing.T) {
+	h := New(schemaUnavailableRepo{Repository: repository.NewMemory()}, nil, config.Config{}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	w := call(h, "GET", "/readyz", "", "")
 	if w.Code != 503 || strings.Contains(w.Body.String(), io.ErrUnexpectedEOF.Error()) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
