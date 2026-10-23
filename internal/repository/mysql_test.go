@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"regexp"
 	"strings"
@@ -164,6 +165,42 @@ func TestMySQLPutImportedDuplicateIDIsIdempotentButUniqueConflictIsError(t *test
 	}
 	if err = m.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMySQLPutImportedChecksExistingParentBindings(t *testing.T) {
+	for _, tc := range []struct {
+		collection, table, bindings string
+		value                       any
+		args                        []driver.Value
+	}{
+		{"admins", "admins", " AND organization_id=?", Admin{ID: "id", OrganizationID: "org"}, []driver.Value{"id", "org"}},
+		{"applications", "applications", " AND organization_id=? AND created_by=?", Application{ID: "id", OrganizationID: "org", CreatedBy: "admin"}, []driver.Value{"id", "org", "admin"}},
+		{"comments", "comments", " AND application_id=?", Comment{ID: "id", ApplicationID: "app"}, []driver.Value{"id", "app"}},
+		{"replies", "comment_replies", " AND comment_id=?", Reply{ID: "id", CommentID: "comment"}, []driver.Value{"id", "comment"}},
+	} {
+		for _, match := range []bool{false, true} {
+			name := "conflicting bindings"
+			if match {
+				name = "identical bindings"
+			}
+			t.Run(tc.collection+"/"+name, func(t *testing.T) {
+				r, mock := mockedMySQL(t)
+				mock.ExpectExec("INSERT INTO " + tc.table).WillReturnError(&mysql.MySQLError{Number: 1062})
+				count := 0
+				if match {
+					count = 1
+				}
+				mock.ExpectQuery(q("SELECT COUNT(*) FROM " + tc.table + " WHERE id=?" + tc.bindings)).WithArgs(tc.args...).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+				inserted, err := r.PutImported(context.Background(), tc.collection, tc.value)
+				if inserted || (match && err != nil) || (!match && !errors.Is(err, ErrConflict)) {
+					t.Errorf("existing parent match=%t: inserted=%t err=%v", match, inserted, err)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
 	}
 }
 

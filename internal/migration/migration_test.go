@@ -33,16 +33,21 @@ func (f fakeSource) Iterate(ctx context.Context, collection string, visit func(b
 }
 
 type fakeSink struct {
-	migrated int
-	rows     map[string]map[string]any
-	putError error
-	putCalls int
+	migrated   int
+	rows       map[string]map[string]any
+	putError   error
+	putErrorAt int
+	putCalls   int
 }
 
 func (f *fakeSink) Migrate(context.Context) error { f.migrated++; return nil }
 func (f *fakeSink) PutImported(_ context.Context, kind string, value any) (bool, error) {
 	f.putCalls++
-	if f.putError != nil && f.putCalls == 2 {
+	errorAt := f.putErrorAt
+	if errorAt == 0 {
+		errorAt = 2
+	}
+	if f.putError != nil && f.putCalls == errorAt {
 		return false, f.putError
 	}
 	if f.rows == nil {
@@ -69,6 +74,39 @@ func (f *fakeSink) PutImported(_ context.Context, kind string, value any) (bool,
 	}
 	f.rows[kind][id] = value
 	return true, nil
+}
+
+func validImportSource(t *testing.T) fakeSource {
+	t.Helper()
+	now := time.Date(2023, 7, 8, 9, 10, 11, 0, time.UTC)
+	return fakeSource{
+		"organizations": {{"_id": "source-org", "name": "Source Org", "email": "org@example.invalid", "secret": testBcryptHash(t), "createdAt": now, "updatedAt": now}},
+		"admins":        {{"_id": "source-admin", "organizationId": "source-org", "fullname": "Source Admin", "email": "admin@example.invalid", "password": testBcryptHash(t), "createdAt": now, "updatedAt": now}},
+		"applications":  {{"_id": "shared-app", "organizationId": "source-org", "createdBy": "source-admin", "name": "Source App", "createdAt": now, "updatedAt": now}},
+		"comments":      {{"_id": "source-comment", "applicationId": "shared-app", "ownerId": "owner", "content": "Source comment", "createdAt": now, "updatedAt": now}},
+		"replies":       {{"_id": "source-reply", "commentId": "source-comment", "ownerId": "owner", "content": "Source reply", "createdAt": now, "updatedAt": now}},
+	}
+}
+
+func TestRunStopsBeforeChildrenOnTargetBindingConflict(t *testing.T) {
+	existing := repository.Application{ID: "shared-app", OrganizationID: "other-org", CreatedBy: "other-admin", Name: "Existing App"}
+	sink := &fakeSink{
+		rows:     map[string]map[string]any{"applications": {existing.ID: existing}},
+		putError: repository.ErrConflict, putErrorAt: 3,
+	}
+	report, err := Run(context.Background(), validImportSource(t), sink, false)
+	if err == nil || err.Error() != "insert applications record 1 failed" {
+		t.Fatalf("expected sanitized application location, got %v", err)
+	}
+	if sink.putCalls != 3 || len(sink.rows["comments"]) != 0 || len(sink.rows["replies"]) != 0 {
+		t.Fatal("target conflict allowed child inserts")
+	}
+	if sink.rows["applications"][existing.ID] != existing {
+		t.Fatal("target application was overwritten")
+	}
+	if report["applications"].Skipped != 0 || report["applications"].Inserted != 0 {
+		t.Fatal("target conflict was counted as success")
+	}
 }
 
 func TestRunRejectsOrphanBeforeAnyWrites(t *testing.T) {

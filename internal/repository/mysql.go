@@ -500,8 +500,24 @@ func (m *MySQL) PutImported(ctx context.Context, kind string, value any) (bool, 
 	var me *mysql.MySQLError
 	if errors.As(err, &me) && me.Number == 1062 {
 		table := map[string]string{"organizations": "organizations", "admins": "admins", "applications": "applications", "comments": "comments", "replies": "comment_replies"}[kind]
+		matchQuery := "SELECT COUNT(*) FROM " + table + " WHERE id=?"
+		matchArgs := []any{id}
+		switch v := value.(type) {
+		case Admin:
+			matchQuery += " AND organization_id=?"
+			matchArgs = append(matchArgs, v.OrganizationID)
+		case Application:
+			matchQuery += " AND organization_id=? AND created_by=?"
+			matchArgs = append(matchArgs, v.OrganizationID, v.CreatedBy)
+		case Comment:
+			matchQuery += " AND application_id=?"
+			matchArgs = append(matchArgs, v.ApplicationID)
+		case Reply:
+			matchQuery += " AND comment_id=?"
+			matchArgs = append(matchArgs, v.CommentID)
+		}
 		var exists int
-		e := m.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE id=?", id).Scan(&exists)
+		e := m.db.QueryRowContext(ctx, matchQuery, matchArgs...).Scan(&exists)
 		if e == nil && exists > 0 {
 			return false, nil
 		}
