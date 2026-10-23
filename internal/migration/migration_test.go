@@ -109,6 +109,119 @@ func TestRunStopsBeforeChildrenOnTargetBindingConflict(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNormalizedIDCollisionsBeforeAnyWrites(t *testing.T) {
+	for _, collection := range collections {
+		for _, stringFirst := range []bool{false, true} {
+			order := "object first"
+			if stringFirst {
+				order = "string first"
+			}
+			for _, dryRun := range []bool{false, true} {
+				mode := "import"
+				if dryRun {
+					mode = "dry run"
+				}
+				t.Run(collection+"/"+order+"/"+mode, func(t *testing.T) {
+					source := validImportSource(t)
+					id := bson.NewObjectID()
+					first := source[collection][0]
+					second := bson.M{}
+					for key, value := range first {
+						second[key] = value
+					}
+					first["_id"], second["_id"] = id, id.Hex()
+					second["content"] = "Different content"
+					if stringFirst {
+						first, second = second, first
+					}
+					source[collection] = []bson.M{first, second}
+					switch collection {
+					case "organizations":
+						source["admins"][0]["organizationId"] = id
+						source["applications"][0]["organizationId"] = id
+					case "admins":
+						source["applications"][0]["createdBy"] = id
+					case "applications":
+						source["comments"][0]["applicationId"] = id
+					case "comments":
+						source["replies"][0]["commentId"] = id
+					}
+					sink := &fakeSink{}
+					report, err := Run(context.Background(), source, sink, dryRun)
+					if err == nil || err.Error() != "duplicate "+collection+" records 1 and 2 after ID normalization" {
+						t.Errorf("expected sanitized normalized ID collision location, got %v", err)
+					}
+					if sink.migrated != 0 || sink.putCalls != 0 || len(sink.rows) != 0 {
+						t.Error("normalized ID collision allowed target writes")
+					}
+					if got := report[collection]; got.Read != 2 || got.Inserted != 0 || got.Skipped != 0 {
+						t.Errorf("unexpected collision counts: %#v", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRunImportsDistinctNormalizedIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ids  []any
+	}{
+		{"distinct ObjectIDs", []any{bson.NewObjectID(), bson.NewObjectID()}},
+		{"case sensitive strings", []any{"x", "X"}},
+		{"mixed distinct types", []any{bson.NewObjectID(), "string-id"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := validImportSource(t)
+			first := source["comments"][0]
+			second := bson.M{}
+			for key, value := range first {
+				second[key] = value
+			}
+			first["_id"], second["_id"] = tc.ids[0], tc.ids[1]
+			second["content"] = "Second comment"
+			source["comments"] = []bson.M{first, second}
+			source["replies"][0]["commentId"] = tc.ids[0]
+			sink := &fakeSink{}
+			for attempt := 0; attempt < 2; attempt++ {
+				report, err := Run(context.Background(), source, sink, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := Counts{Read: 2, Inserted: 2}
+				if attempt == 1 {
+					want = Counts{Read: 2, Skipped: 2}
+				}
+				if report["comments"] != want || len(sink.rows["comments"]) != 2 {
+					t.Fatalf("attempt %d: unexpected comment counts: %#v", attempt, report["comments"])
+				}
+			}
+		})
+	}
+}
+
+func TestRunAllowsSameNormalizedIDInDifferentCollections(t *testing.T) {
+	source := validImportSource(t)
+	for _, collection := range collections {
+		source[collection][0]["_id"] = "shared-id"
+	}
+	source["admins"][0]["organizationId"] = "shared-id"
+	source["applications"][0]["organizationId"] = "shared-id"
+	source["applications"][0]["createdBy"] = "shared-id"
+	source["comments"][0]["applicationId"] = "shared-id"
+	source["replies"][0]["commentId"] = "shared-id"
+	report, err := Run(context.Background(), source, &fakeSink{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, collection := range collections {
+		if report[collection] != (Counts{Read: 1, Inserted: 1}) {
+			t.Fatalf("unexpected %s counts: %#v", collection, report[collection])
+		}
+	}
+}
+
 func TestRunRejectsOrphanBeforeAnyWrites(t *testing.T) {
 	now := time.Now()
 	orgID := bson.NewObjectID()
