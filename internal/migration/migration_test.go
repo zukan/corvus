@@ -33,16 +33,21 @@ func (f fakeSource) Iterate(ctx context.Context, collection string, visit func(b
 }
 
 type fakeSink struct {
-	migrated int
-	rows     map[string]map[string]any
-	putError error
-	putCalls int
+	migrated   int
+	rows       map[string]map[string]any
+	putError   error
+	putErrorAt int
+	putCalls   int
 }
 
 func (f *fakeSink) Migrate(context.Context) error { f.migrated++; return nil }
 func (f *fakeSink) PutImported(_ context.Context, kind string, value any) (bool, error) {
 	f.putCalls++
-	if f.putError != nil && f.putCalls == 2 {
+	errorAt := f.putErrorAt
+	if errorAt == 0 {
+		errorAt = 2
+	}
+	if f.putError != nil && f.putCalls == errorAt {
 		return false, f.putError
 	}
 	if f.rows == nil {
@@ -69,6 +74,152 @@ func (f *fakeSink) PutImported(_ context.Context, kind string, value any) (bool,
 	}
 	f.rows[kind][id] = value
 	return true, nil
+}
+
+func validImportSource(t *testing.T) fakeSource {
+	t.Helper()
+	now := time.Date(2023, 7, 8, 9, 10, 11, 0, time.UTC)
+	return fakeSource{
+		"organizations": {{"_id": "source-org", "name": "Source Org", "email": "org@example.invalid", "secret": testBcryptHash(t), "createdAt": now, "updatedAt": now}},
+		"admins":        {{"_id": "source-admin", "organizationId": "source-org", "fullname": "Source Admin", "email": "admin@example.invalid", "password": testBcryptHash(t), "createdAt": now, "updatedAt": now}},
+		"applications":  {{"_id": "shared-app", "organizationId": "source-org", "createdBy": "source-admin", "name": "Source App", "createdAt": now, "updatedAt": now}},
+		"comments":      {{"_id": "source-comment", "applicationId": "shared-app", "ownerId": "owner", "content": "Source comment", "createdAt": now, "updatedAt": now}},
+		"replies":       {{"_id": "source-reply", "commentId": "source-comment", "ownerId": "owner", "content": "Source reply", "createdAt": now, "updatedAt": now}},
+	}
+}
+
+func TestRunStopsBeforeChildrenOnTargetBindingConflict(t *testing.T) {
+	existing := repository.Application{ID: "shared-app", OrganizationID: "other-org", CreatedBy: "other-admin", Name: "Existing App"}
+	sink := &fakeSink{
+		rows:     map[string]map[string]any{"applications": {existing.ID: existing}},
+		putError: repository.ErrConflict, putErrorAt: 3,
+	}
+	report, err := Run(context.Background(), validImportSource(t), sink, false)
+	if err == nil || err.Error() != "insert applications record 1 failed" {
+		t.Fatalf("expected sanitized application location, got %v", err)
+	}
+	if sink.putCalls != 3 || len(sink.rows["comments"]) != 0 || len(sink.rows["replies"]) != 0 {
+		t.Fatal("target conflict allowed child inserts")
+	}
+	if sink.rows["applications"][existing.ID] != existing {
+		t.Fatal("target application was overwritten")
+	}
+	if report["applications"].Skipped != 0 || report["applications"].Inserted != 0 {
+		t.Fatal("target conflict was counted as success")
+	}
+}
+
+func TestRunRejectsNormalizedIDCollisionsBeforeAnyWrites(t *testing.T) {
+	for _, collection := range collections {
+		for _, stringFirst := range []bool{false, true} {
+			order := "object first"
+			if stringFirst {
+				order = "string first"
+			}
+			for _, dryRun := range []bool{false, true} {
+				mode := "import"
+				if dryRun {
+					mode = "dry run"
+				}
+				t.Run(collection+"/"+order+"/"+mode, func(t *testing.T) {
+					source := validImportSource(t)
+					id := bson.NewObjectID()
+					first := source[collection][0]
+					second := bson.M{}
+					for key, value := range first {
+						second[key] = value
+					}
+					first["_id"], second["_id"] = id, id.Hex()
+					second["content"] = "Different content"
+					if stringFirst {
+						first, second = second, first
+					}
+					source[collection] = []bson.M{first, second}
+					switch collection {
+					case "organizations":
+						source["admins"][0]["organizationId"] = id
+						source["applications"][0]["organizationId"] = id
+					case "admins":
+						source["applications"][0]["createdBy"] = id
+					case "applications":
+						source["comments"][0]["applicationId"] = id
+					case "comments":
+						source["replies"][0]["commentId"] = id
+					}
+					sink := &fakeSink{}
+					report, err := Run(context.Background(), source, sink, dryRun)
+					if err == nil || err.Error() != "duplicate "+collection+" records 1 and 2 after ID normalization" {
+						t.Errorf("expected sanitized normalized ID collision location, got %v", err)
+					}
+					if sink.migrated != 0 || sink.putCalls != 0 || len(sink.rows) != 0 {
+						t.Error("normalized ID collision allowed target writes")
+					}
+					if got := report[collection]; got.Read != 2 || got.Inserted != 0 || got.Skipped != 0 {
+						t.Errorf("unexpected collision counts: %#v", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRunImportsDistinctNormalizedIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ids  []any
+	}{
+		{"distinct ObjectIDs", []any{bson.NewObjectID(), bson.NewObjectID()}},
+		{"case sensitive strings", []any{"x", "X"}},
+		{"mixed distinct types", []any{bson.NewObjectID(), "string-id"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := validImportSource(t)
+			first := source["comments"][0]
+			second := bson.M{}
+			for key, value := range first {
+				second[key] = value
+			}
+			first["_id"], second["_id"] = tc.ids[0], tc.ids[1]
+			second["content"] = "Second comment"
+			source["comments"] = []bson.M{first, second}
+			source["replies"][0]["commentId"] = tc.ids[0]
+			sink := &fakeSink{}
+			for attempt := 0; attempt < 2; attempt++ {
+				report, err := Run(context.Background(), source, sink, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := Counts{Read: 2, Inserted: 2}
+				if attempt == 1 {
+					want = Counts{Read: 2, Skipped: 2}
+				}
+				if report["comments"] != want || len(sink.rows["comments"]) != 2 {
+					t.Fatalf("attempt %d: unexpected comment counts: %#v", attempt, report["comments"])
+				}
+			}
+		})
+	}
+}
+
+func TestRunAllowsSameNormalizedIDInDifferentCollections(t *testing.T) {
+	source := validImportSource(t)
+	for _, collection := range collections {
+		source[collection][0]["_id"] = "shared-id"
+	}
+	source["admins"][0]["organizationId"] = "shared-id"
+	source["applications"][0]["organizationId"] = "shared-id"
+	source["applications"][0]["createdBy"] = "shared-id"
+	source["comments"][0]["applicationId"] = "shared-id"
+	source["replies"][0]["commentId"] = "shared-id"
+	report, err := Run(context.Background(), source, &fakeSink{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, collection := range collections {
+		if report[collection] != (Counts{Read: 1, Inserted: 1}) {
+			t.Fatalf("unexpected %s counts: %#v", collection, report[collection])
+		}
+	}
 }
 
 func TestRunRejectsOrphanBeforeAnyWrites(t *testing.T) {

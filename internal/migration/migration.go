@@ -56,6 +56,7 @@ func Run(ctx context.Context, source Source, sink Sink, dryRun bool) (map[string
 	}
 	for _, collection := range collections {
 		var count Counts
+		seenIDs := make(map[string]int)
 		index := 0
 		var recordErr error
 		err := source.Iterate(ctx, collection, func(doc bson.M) error {
@@ -73,6 +74,11 @@ func Run(ctx context.Context, source Source, sink Sink, dryRun bool) (map[string
 			}
 			relation, ok := relationFor(collection, index, value)
 			if ok {
+				if first, exists := seenIDs[relation.id]; exists {
+					recordErr = fmt.Errorf("duplicate %s records %d and %d after ID normalization", collection, first, index)
+					return recordErr
+				}
+				seenIDs[relation.id] = index
 				relations = append(relations, relation)
 			}
 			record := stagedRecord{collection: collection, index: index}

@@ -32,6 +32,107 @@ type trackingSink struct {
 	writes     int
 }
 
+func TestTargetApplicationBindingIntegration(t *testing.T) {
+	dsn := os.Getenv("MYSQL_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set MYSQL_TEST_DSN to a disposable MySQL service")
+	}
+	for _, tc := range []struct {
+		name, organization, creator string
+		conflict                    bool
+	}{
+		{"different organization", "other-org", "other-admin", true},
+		{"different creator", "source-org", "other-admin", true},
+		{"identical bindings", "source-org", "source-admin", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			cfg, err := mysql.ParseDSN(dsn)
+			if err != nil {
+				t.Fatal("parse disposable MySQL test DSN failed")
+			}
+			cfg.DBName = ""
+			adminDB, err := sql.Open("mysql", cfg.FormatDSN())
+			if err != nil {
+				t.Fatal("open disposable MySQL setup connection failed")
+			}
+			defer adminDB.Close()
+			database := "corvus_binding_" + bson.NewObjectID().Hex()
+			if _, err := adminDB.ExecContext(ctx, "CREATE DATABASE `"+database+"`"); err != nil {
+				t.Fatal("create isolated MySQL test database failed")
+			}
+			defer func() {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cleanupCancel()
+				if _, err := adminDB.ExecContext(cleanupCtx, "DROP DATABASE `"+database+"`"); err != nil {
+					t.Error("remove isolated MySQL test database failed")
+				}
+			}()
+			cfg.DBName = database
+			target, err := repository.Open(ctx, cfg.FormatDSN())
+			if err != nil {
+				t.Fatal("open isolated MySQL test database failed")
+			}
+			defer target.Close()
+			if err := target.Migrate(ctx); err != nil {
+				t.Fatal("migrate isolated MySQL test database failed")
+			}
+			source := validImportSource(t)
+			for _, collection := range []string{"organizations", "admins", "applications"} {
+				value, err := convert(collection, source[collection][0])
+				if err != nil {
+					t.Fatal("convert synthetic target fixture failed")
+				}
+				switch v := value.(type) {
+				case repository.Organization:
+					v.ID, v.Email = tc.organization, "target-org@example.invalid"
+					value = v
+				case repository.Admin:
+					v.ID, v.OrganizationID = tc.creator, tc.organization
+					v.Email = "target-admin@example.invalid"
+					value = v
+				case repository.Application:
+					v.OrganizationID, v.CreatedBy, v.Name = tc.organization, tc.creator, "Existing App"
+					value = v
+				}
+				if inserted, err := target.PutImported(ctx, collection, value); err != nil || !inserted {
+					t.Fatal("seed synthetic target fixture failed")
+				}
+			}
+			report, runErr := Run(ctx, source, target, false)
+			if tc.conflict {
+				if runErr == nil || runErr.Error() != "insert applications record 1 failed" {
+					t.Errorf("expected sanitized application conflict, got %v", runErr)
+				}
+			} else {
+				if runErr != nil || report["applications"].Skipped != 1 || report["comments"].Inserted != 1 {
+					t.Fatalf("identical bindings did not skip and import children: %v", runErr)
+				}
+				report, runErr = Run(ctx, source, target, false)
+				if runErr != nil {
+					t.Fatalf("repeat import failed: %v", runErr)
+				}
+				assertCounts(t, report, 1, 0, 1)
+			}
+			var organization, creator, name string
+			if err := adminDB.QueryRowContext(ctx, "SELECT organization_id,created_by,name FROM `"+database+"`.applications WHERE id=?", "shared-app").Scan(&organization, &creator, &name); err != nil {
+				t.Fatal("inspect target application failed")
+			}
+			if organization != tc.organization || creator != tc.creator || name != "Existing App" {
+				t.Error("target application was overwritten or moved")
+			}
+			var count int
+			if err := adminDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+database+"`.comments WHERE id=?", "source-comment").Scan(&count); err != nil {
+				t.Fatal("inspect target comments failed")
+			}
+			if tc.conflict && count != 0 {
+				t.Error("conflicting application allowed child comment insertion")
+			}
+		})
+	}
+}
+
 func (s *trackingSink) Migrate(ctx context.Context) error {
 	s.migrations++
 	return s.target.Migrate(ctx)
